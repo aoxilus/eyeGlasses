@@ -43,3 +43,17 @@
 - Se agrego `docs/implementation_tasks.md` con fases concretas para implementar el overlay GPU.
 - Se definio el rol del margen 90%: no es la graduacion, es espacio seguro para estirar/rotar sin cortar imagen.
 - Se documento la formula inicial para `scaleAlongAxis` y `scaleAcrossAxis` usando `sphere`, `cylinder`, `axis`, distancia y margen.
+
+## 2026-08-24 - Idea de fuente adaptativa
+
+- Se agrego `docs/adaptive_font_for_vision.md` para explorar una fuente o perfil tipografico ajustado a la deficiencia visual del usuario.
+- Se documento que esta tecnica puede mejorar letras sin latencia, pero no corrige fotos, video ni contenido rasterizado.
+- Se agrego una fase de tareas para calibrar `weight`, `tracking`, `width`, `line-height` y exportar CSS/perfil.
+
+## 2026-08-24 - Inicio implementacion GPU
+
+- Se extrajo `OpticalState` a `optical_state.h` para compartir parametros entre UI Win32 y renderer GPU.
+- Se agrego `d3d_overlay.h/.cpp` con probe inicial de D3D11 hardware/WARP.
+- Se agrego `optical_shader.hlsl` con transformacion conceptual de margen, eje y escalado anisotropico.
+- Se actualizo `build.bat` para compilar el modulo D3D11 y enlazar `d3d11`/`dxgi`.
+- El renderer activo sigue siendo GDI+; D3D11 aun esta en modo esqueleto/probe para reducir riesgo.

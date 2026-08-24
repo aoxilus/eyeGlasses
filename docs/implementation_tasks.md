@@ -4,7 +4,7 @@ Lista de tareas para construir la version rapida con GPU sin saltar directo a dr
 
 ## Phase 0 - Stabilize Current Win32 Build
 
-- [ ] Confirmar que los cambios locales actuales en `main.cpp` compilan.
+- [x] Confirmar que los cambios locales actuales en `main.cpp` compilan.
 - [ ] Revisar hotkeys globales: `Ctrl+Alt+V`, `F11`, `Esc`.
 - [ ] Verificar que el overlay no bloquee mouse/teclado cuando esta en pantalla completa.
 - [ ] Mantener `.gitignore` sin subir `VisionCompensator.exe`.
@@ -17,10 +17,10 @@ build.bat genera VisionCompensator.exe sin errores
 
 ## Phase 1 - Extract Shared Optical State
 
-- [ ] Crear `optical_state.h`.
-- [ ] Mover `OpticalState`, enums y constantes opticas fuera de `main.cpp`.
-- [ ] Mantener compatibilidad con UI actual.
-- [ ] Compilar.
+- [x] Crear `optical_state.h`.
+- [x] Mover `OpticalState`, enums y constantes opticas fuera de `main.cpp`.
+- [x] Mantener compatibilidad con UI actual.
+- [x] Compilar.
 
 Acceptance:
 
@@ -30,9 +30,10 @@ main.cpp sigue funcionando igual, pero el estado optico queda reusable por D3D11
 
 ## Phase 2 - Add D3D11 Overlay Skeleton
 
-- [ ] Crear `d3d_overlay.h` y `d3d_overlay.cpp`.
+- [x] Crear `d3d_overlay.h` y `d3d_overlay.cpp`.
 - [ ] Crear ventana fullscreen borderless/topmost por monitor.
-- [ ] Inicializar `ID3D11Device`, `ID3D11DeviceContext`, `IDXGISwapChain`.
+- [x] Inicializar `ID3D11Device`, `ID3D11DeviceContext`.
+- [ ] Inicializar `IDXGISwapChain`.
 - [ ] Renderizar color solido o textura dummy.
 - [ ] Salir con `Esc` / hotkey.
 
@@ -40,6 +41,12 @@ Acceptance:
 
 ```text
 Se abre overlay GPU fullscreen y se cierra sin congelar Windows
+```
+
+Status actual:
+
+```text
+Probe D3D11 agregado y compilando. Todavia no renderiza overlay GPU; la app sigue usando fallback GDI+.
 ```
 
 ## Phase 3 - DXGI Desktop Duplication Capture
@@ -109,6 +116,22 @@ Acceptance:
 
 ```text
 Decision documentada basada en mediciones reales de latencia/calidad
+```
+
+## Phase 8 - Adaptive Font For Text Legibility
+
+- [ ] Crear modo `Font Test` con comparacion A/B de estilos de letra.
+- [ ] Probar fuentes base: Atkinson Hyperlegible, Lexend, Inter, Segoe UI Variable.
+- [ ] Optimizar `fontWeight`, `letterSpacing`, `fontWidth`, `lineHeight` y `minimumSizePx` usando respuestas del usuario.
+- [ ] Guardar resultado en `vision_profile.json`.
+- [ ] Exportar recomendaciones CSS para navegador/apps web.
+- [ ] Investigar generacion `.ttf`/`.otf` con `fonttools` o FontForge si una fuente open-source lo permite.
+- [ ] Documentar limitaciones: solo ayuda texto, no fotos/video/iconos, y no sustituye overlay optico.
+
+Acceptance:
+
+```text
+El usuario puede elegir un preset tipografico que haga letras mas legibles sin activar overlay ni agregar latencia
 ```
 
 ## Build Command Target
