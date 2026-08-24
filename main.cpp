@@ -25,6 +25,9 @@ typedef ULONG PROPID;
 #include <iomanip>
 #include <algorithm>
 
+#include "optical_state.h"
+#include "d3d_overlay.h"
+
 using namespace Gdiplus;
 using namespace std;
 
@@ -33,72 +36,18 @@ using namespace std;
 #define WDA_EXCLUDEFROMCAPTURE 0x00000011
 #endif
 
-// Application Modes
-enum AppPhase {
-    PHASE_CALIBRATION_WIZARD = 0,
-    PHASE_MAGNIFIER_90 = 1,
-    PHASE_FULLSCREEN_MULTI = 2
-};
-
-// Clinical Jackson Cross-Cylinder (JCC) Phases
-enum CalibPhase {
-    CALIB_SPHERE = 0,      // Miopía / Esfera (-10.00 D a +10.00 D)
-    CALIB_CYL_POWER,       // Astigmatismo (Poder Cilíndrico)
-    CALIB_AXIS_FINE        // Eje / Ángulo fino (Pasos clínicos de +/- 5°)
-};
-
-// Multi-Monitor Target
-enum MonitorTarget {
-    MONITOR_PRIMARY = 0,
-    MONITOR_SECONDARY = 1,
-    MONITOR_ALL_VIRTUAL = 2
-};
-
-// --- Optical Parameters Struct ---
-struct OpticalState {
-    // Current Prescription (OD)
-    float sphere = -4.50f;      // Sphere / Miopía (-10.00 to +10.00 D)
-    float cylinder = -1.25f;    // Cyl / Astigmatismo (-8.00 to +8.00 D)
-    int axis = 95;              // Axis / Ángulo (0° to 180°)
-    int distance = 60;          // Distancia al monitor (cm)
-    float deconv = 1.2f;        // Nitidez / Deconv (0.0x to 5.0x)
-    float contrast = 1.10f;     // Contraste (0.8x to 2.5x)
-    float marginRatio = 0.92f;  // -8% a -10% Overscan/Headroom margin for skew/stretch
-
-    AppPhase appPhase = PHASE_CALIBRATION_WIZARD;
-    CalibPhase calibPhase = CALIB_SPHERE;
-    MonitorTarget monitorTarget = MONITOR_PRIMARY;
-
-    bool isFullScreen = false;
-    RECT prevNormalRect = {0, 0, 1300, 800};
-
-    // Automatic 1-second interval toggle (Option 1 <-> Option 2)
-    int autoCurrentOption = 1; // 1 or 2
-    DWORD lastToggleTick = 0;
-
-    // Clinical Jackson Cross-Cylinder (JCC) parameters for smart guessing
-    float sphereCenter = -4.50f;
-    float sphereStep = 1.00f;   // Clinical step starting at 1.00 D -> 0.50 D -> 0.25 D
-
-    float cylCenter = -1.25f;
-    float cylStep = 0.75f;    // Clinical step 0.75 D -> 0.50 D -> 0.25 D
-
-    float axisCenter = 95.0f;
-    float axisStep = 10.0f;    // Clinical Jackson step +/- 5° to 10° (never wild 45°/90° spins!)
-
-    float opt1Sphere = -4.00f, opt2Sphere = -5.00f;
-    float opt1Cyl = -0.75f, opt2Cyl = -1.75f;
-    float opt1Axis = 90.0f, opt2Axis = 100.0f;
-
-    int iterationCount = 0;
-    int sourceType = 0;         // 0 = Medical Chart, 3 = Live Desktop
-};
+// Hotkey IDs
+#define HOTKEY_ID_TOGGLE_COMPENSATION 101
+#define HOTKEY_ID_FULLSCREEN          102
+#define HOTKEY_ID_ESCAPE              103
 
 // Global Application Instance
 OpticalState g_state;
 ULONG_PTR g_gdiplusToken = 0;
 HWND g_hWndMain = NULL;
 HWND g_hWndViewport = NULL;
+bool g_d3dAvailable = false;
+std::wstring g_d3dStatus = L"GPU overlay no probado.";
 
 COLORREF g_colorWindowBg = RGB(5, 8, 17);
 COLORREF g_colorPanelBg = RGB(15, 23, 42);
@@ -168,8 +117,6 @@ HFONT g_hFontApplyBtn = NULL;
 HFONT g_hFontInstrBold = NULL;
 HFONT g_hFontInstrBody = NULL;
 
-std::vector<HWND> g_staticControls;
-
 #define TIMER_FRAME_UPDATE 1001
 
 // Control IDs
@@ -210,12 +157,6 @@ std::wstring FormatFloat(float val, int decimals, const std::wstring& unit = L""
     return ss.str();
 }
 
-HWND CreateStyledStatic(HWND parent, const std::wstring& text, DWORD style, HINSTANCE hInstance) {
-    HWND h = CreateWindowW(L"STATIC", text.c_str(), WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | style, 0, 0, 100, 24, parent, NULL, hInstance, NULL);
-    if (h) g_staticControls.push_back(h);
-    return h;
-}
-
 void DrawModernButton(LPDRAWITEMSTRUCT dis) {
     if (!dis || !dis->hwndItem) return;
 
@@ -245,7 +186,7 @@ void DrawModernButton(LPDRAWITEMSTRUCT dis) {
     HPEN pen = CreatePen(PS_SOLID, focus ? 3 : 2, border);
     HGDIOBJ oldBrush = SelectObject(hdc, bg);
     HGDIOBJ oldPen = SelectObject(hdc, pen);
-    RoundRect(hdc, dis->rcItem.left, dis->rcItem.top, dis->rcItem.right, dis->rcItem.bottom, 14, 14);
+    RoundRect(hdc, dis->rcItem.left, dis->rcItem.top, dis->rcItem.right, dis->rcItem.bottom, 12, 12);
     SelectObject(hdc, oldPen);
     SelectObject(hdc, oldBrush);
     DeleteObject(pen);
@@ -266,6 +207,7 @@ void UpdateLabels() {
     if (g_lblValCylinder) SetWindowTextW(g_lblValCylinder, FormatFloat(g_state.cylinder, 2, L" D").c_str());
     if (g_lblValAxis) SetWindowTextW(g_lblValAxis, (std::to_wstring(g_state.axis) + L"°").c_str());
     if (g_lblValDeconv) SetWindowTextW(g_lblValDeconv, FormatFloat(g_state.deconv, 1, L"x").c_str());
+    UpdateD3DOverlayParameters(g_state);
 
     // Update Right Panel Instructions & Status
     if (g_state.appPhase == PHASE_CALIBRATION_WIZARD) {
@@ -279,17 +221,17 @@ void UpdateLabels() {
             : L"🔵 En pantalla: OPCIÓN 2";
         if (g_hInstrOptionTag) SetWindowTextW(g_hInstrOptionTag, optStr.c_str());
 
-        if (g_hInstrLine1) SetWindowTextW(g_hInstrLine1, L"1. Mira bordes negros, halos y sombras dobles.");
-        if (g_hInstrLine2) SetWindowTextW(g_hInstrLine2, L"2. Pulsa 1 o 2 solo si una opción es claramente más nítida.");
-        if (g_hInstrLine3) SetWindowTextW(g_hInstrLine3, L"3. Pulsa IGUAL cuando no puedas distinguir diferencia.");
+        if (g_hInstrLine1) SetWindowTextW(g_hInstrLine1, L"• Alterna [1] y [2] cada 1 segundo automáticamente.");
+        if (g_hInstrLine2) SetWindowTextW(g_hInstrLine2, L"• Pulsa [1] o [2] según cuál se vea más clara.");
+        if (g_hInstrLine3) SetWindowTextW(g_hInstrLine3, (L"• " + g_d3dStatus).c_str());
     } else {
         std::wstring targetStr = (g_state.monitorTarget == MONITOR_PRIMARY) ? L"Monitor 1" :
                                  (g_state.monitorTarget == MONITOR_SECONDARY) ? L"Monitor 2" : L"Todos los Monitores";
         if (g_hInstrStep) SetWindowTextW(g_hInstrStep, (L"Estado: 🔎 Corrección Activa (" + targetStr + L")").c_str());
         if (g_hInstrOptionTag) SetWindowTextW(g_hInstrOptionTag, (L"Receta: " + FormatFloat(g_state.sphere, 2, L"D") + L" / " + FormatFloat(g_state.cylinder, 2, L"D") + L" @" + std::to_wstring(g_state.axis) + L"°").c_str());
-        if (g_hInstrLine1) SetWindowTextW(g_hInstrLine1, L"F11: pantalla completa con margen seguro.");
-        if (g_hInstrLine2) SetWindowTextW(g_hInstrLine2, L"Cambiar Monitor: prueba Monitor 1, 2 o todos.");
-        if (g_hInstrLine3) SetWindowTextW(g_hInstrLine3, L"Ajusta +/- si necesitas afinar la corrección.");
+        if (g_hInstrLine1) SetWindowTextW(g_hInstrLine1, L"• [F11] o [Ctrl+Alt+V] para activar/desactivar.");
+        if (g_hInstrLine2) SetWindowTextW(g_hInstrLine2, L"• Ratón y teclado 100% funcionales (Click-Through).");
+        if (g_hInstrLine3) SetWindowTextW(g_hInstrLine3, L"• Pulsa [Esc] para volver a la ventana de ajuste.");
     }
 }
 
@@ -308,7 +250,6 @@ void SetupCurrentTestOptions() {
         g_state.opt1Cyl = max(-8.0f, min(8.0f, g_state.opt1Cyl));
         g_state.opt2Cyl = max(-8.0f, min(8.0f, g_state.opt2Cyl));
     } else if (g_state.calibPhase == CALIB_AXIS_FINE) {
-        // Clinical +/- 5° oscillation around current axis
         g_state.opt1Axis = (float)((int)(g_state.axisCenter - (g_state.axisStep * 0.5f) + 181) % 181);
         g_state.opt2Axis = (float)((int)(g_state.axisCenter + (g_state.axisStep * 0.5f) + 181) % 181);
     }
@@ -320,8 +261,8 @@ void ResetToDefaults() {
     g_state.axis = 95;
     g_state.distance = 60;
     g_state.deconv = 1.2f;
-    g_state.contrast = 1.10f;
-    g_state.marginRatio = 0.92f;
+    g_state.contrast = 1.05f;
+    g_state.marginRatio = 0.94f;
 
     g_state.appPhase = PHASE_CALIBRATION_WIZARD;
     g_state.calibPhase = CALIB_SPHERE;
@@ -335,7 +276,7 @@ void ResetToDefaults() {
     g_state.cylStep = 0.75f;
 
     g_state.axisCenter = 95.0f;
-    g_state.axisStep = 10.0f; // Fine +/- 5° step
+    g_state.axisStep = 10.0f;
 
     g_state.iterationCount = 0;
     g_state.sourceType = 0;
@@ -360,7 +301,7 @@ void SetWindowTo90Percent(HWND hWnd) {
     SetWindowPos(hWnd, HWND_TOP, posX, posY, winW, winH, SWP_SHOWWINDOW);
 }
 
-// Toggle F11 Fullscreen (across selected monitor or virtual desktop)
+// Toggle F11 Fullscreen with Click-Through Passthrough
 void ToggleFullScreen(HWND hWnd) {
     g_state.isFullScreen = !g_state.isFullScreen;
 
@@ -385,10 +326,14 @@ void ToggleFullScreen(HWND hWnd) {
             }
         }
 
+        // Fullscreen Overlay with Transparent Click-Through so Mouse & Keyboard work on apps below!
         SetWindowLong(hWnd, GWL_STYLE, WS_POPUP | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS);
+        SetWindowLong(hWnd, GWL_EXSTYLE, GetWindowLong(hWnd, GWL_EXSTYLE) | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST);
         SetWindowPos(hWnd, HWND_TOPMOST, vx, vy, vw, vh, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
     } else {
+        // Return to Normal GUI Window with interactive buttons
         SetWindowLong(hWnd, GWL_STYLE, WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS);
+        SetWindowLong(hWnd, GWL_EXSTYLE, GetWindowLong(hWnd, GWL_EXSTYLE) & ~(WS_EX_TRANSPARENT | WS_EX_TOPMOST));
         SetWindowPos(hWnd, HWND_NOTOPMOST, 
                      g_state.prevNormalRect.left, g_state.prevNormalRect.top,
                      g_state.prevNormalRect.right - g_state.prevNormalRect.left,
@@ -432,11 +377,11 @@ void RelayoutControls(int clientW, int clientH) {
     ShowControl(g_hInstrTitle); ShowControl(g_hInstrStep); ShowControl(g_hInstrOptionTag);
     ShowControl(g_hInstrLine1); ShowControl(g_hInstrLine2); ShowControl(g_hInstrLine3);
 
-    int rightPanelW = 390;
-    int bottomBarH = 88;
+    int rightPanelW = 340;
+    int bottomBarH = 76;
 
-    int vpW = clientW - rightPanelW - 30;
-    int vpH = clientH - bottomBarH - 28;
+    int vpW = clientW - rightPanelW - 25;
+    int vpH = clientH - bottomBarH - 25;
 
     // 1. Viewport (Left side)
     if (g_hWndViewport) {
@@ -444,38 +389,38 @@ void RelayoutControls(int clientW, int clientH) {
     }
 
     // 2. Bottom 4 Action Buttons
-    int btnY = vpH + 18;
+    int btnY = vpH + 16;
     int btnCount = 4;
     int gap = 10;
     int singleBtnW = (vpW - (gap * (btnCount - 1))) / btnCount;
 
-    if (g_hBtnOpt1) SetWindowPos(g_hBtnOpt1, NULL, 10 + 0 * (singleBtnW + gap), btnY, singleBtnW, 72, SWP_NOZORDER);
-    if (g_hBtnOpt2) SetWindowPos(g_hBtnOpt2, NULL, 10 + 1 * (singleBtnW + gap), btnY, singleBtnW, 72, SWP_NOZORDER);
-    if (g_hBtnIgual) SetWindowPos(g_hBtnIgual, NULL, 10 + 2 * (singleBtnW + gap), btnY, singleBtnW, 72, SWP_NOZORDER);
-    if (g_hBtnMuchoPeor) SetWindowPos(g_hBtnMuchoPeor, NULL, 10 + 3 * (singleBtnW + gap), btnY, singleBtnW, 72, SWP_NOZORDER);
+    if (g_hBtnOpt1) SetWindowPos(g_hBtnOpt1, NULL, 10 + 0 * (singleBtnW + gap), btnY, singleBtnW, 60, SWP_NOZORDER);
+    if (g_hBtnOpt2) SetWindowPos(g_hBtnOpt2, NULL, 10 + 1 * (singleBtnW + gap), btnY, singleBtnW, 60, SWP_NOZORDER);
+    if (g_hBtnIgual) SetWindowPos(g_hBtnIgual, NULL, 10 + 2 * (singleBtnW + gap), btnY, singleBtnW, 60, SWP_NOZORDER);
+    if (g_hBtnMuchoPeor) SetWindowPos(g_hBtnMuchoPeor, NULL, 10 + 3 * (singleBtnW + gap), btnY, singleBtnW, 60, SWP_NOZORDER);
 
     // 3. Right Side Controls
     int rx = clientW - rightPanelW - 10;
     int ry = 8;
     int rColW = rightPanelW;
 
-    if (g_hODTitle) SetWindowPos(g_hODTitle, NULL, rx, ry, rColW, 32, SWP_NOZORDER);
-    ry += 34;
-    if (g_hODSub) SetWindowPos(g_hODSub, NULL, rx, ry, rColW, 24, SWP_NOZORDER);
-    ry += 30;
+    if (g_hODTitle) SetWindowPos(g_hODTitle, NULL, rx, ry, rColW, 24, SWP_NOZORDER);
+    ry += 24;
+    if (g_hODSub) SetWindowPos(g_hODSub, NULL, rx, ry, rColW, 16, SWP_NOZORDER);
+    ry += 20;
 
     auto LayoutODRow = [&](HWND hLbl, HWND hMinus, HWND hVal, HWND hPlus, HWND hM5 = NULL, HWND hP5 = NULL) {
-        if (hLbl) SetWindowPos(hLbl, NULL, rx, ry + 6, 150, 30, SWP_NOZORDER);
-        if (hMinus) SetWindowPos(hMinus, NULL, rx + 158, ry, 46, 38, SWP_NOZORDER);
-        if (hVal) SetWindowPos(hVal, NULL, rx + 212, ry + 2, 96, 34, SWP_NOZORDER);
-        if (hPlus) SetWindowPos(hPlus, NULL, rx + 316, ry, 46, 38, SWP_NOZORDER);
+        if (hLbl) SetWindowPos(hLbl, NULL, rx, ry + 4, 120, 24, SWP_NOZORDER);
+        if (hMinus) SetWindowPos(hMinus, NULL, rx + 125, ry, 38, 30, SWP_NOZORDER);
+        if (hVal) SetWindowPos(hVal, NULL, rx + 168, ry + 2, 80, 26, SWP_NOZORDER);
+        if (hPlus) SetWindowPos(hPlus, NULL, rx + 254, ry, 38, 30, SWP_NOZORDER);
 
         if (hM5 && hP5) {
-            ry += 42;
-            SetWindowPos(hM5, NULL, rx + 158, ry, 70, 32, SWP_NOZORDER);
-            SetWindowPos(hP5, NULL, rx + 292, ry, 70, 32, SWP_NOZORDER);
+            ry += 32;
+            SetWindowPos(hM5, NULL, rx + 125, ry, 60, 26, SWP_NOZORDER);
+            SetWindowPos(hP5, NULL, rx + 232, ry, 60, 26, SWP_NOZORDER);
         }
-        ry += 44;
+        ry += 34;
     };
 
     LayoutODRow(g_hLblSphere, g_hBtnSphereMinus, g_lblValSphere, g_hBtnSpherePlus);
@@ -484,31 +429,30 @@ void RelayoutControls(int clientW, int clientH) {
     LayoutODRow(g_hLblDeconv, g_hBtnDeconvMinus, g_lblValDeconv, g_hBtnDeconvPlus);
 
     ry += 4;
-    // Primary Action Button: [ 🚀 APLICAR A MONITORES ]
-    if (g_hBtnApplyMonitors) SetWindowPos(g_hBtnApplyMonitors, NULL, rx, ry, rColW, 52, SWP_NOZORDER);
-    ry += 58;
-
-    if (g_hBtnFullScreen) SetWindowPos(g_hBtnFullScreen, NULL, rx, ry, rColW, 40, SWP_NOZORDER);
-    ry += 44;
-    if (g_hBtnToggleMonitor) SetWindowPos(g_hBtnToggleMonitor, NULL, rx, ry, rColW, 40, SWP_NOZORDER);
-    ry += 44;
-    if (g_hBtnToggle) SetWindowPos(g_hBtnToggle, NULL, rx, ry, rColW, 40, SWP_NOZORDER);
-    ry += 44;
-    if (g_hBtnReset) SetWindowPos(g_hBtnReset, NULL, rx, ry, rColW, 38, SWP_NOZORDER);
+    if (g_hBtnApplyMonitors) SetWindowPos(g_hBtnApplyMonitors, NULL, rx, ry, rColW, 42, SWP_NOZORDER);
     ry += 46;
 
+    if (g_hBtnFullScreen) SetWindowPos(g_hBtnFullScreen, NULL, rx, ry, rColW, 32, SWP_NOZORDER);
+    ry += 34;
+    if (g_hBtnToggleMonitor) SetWindowPos(g_hBtnToggleMonitor, NULL, rx, ry, rColW, 32, SWP_NOZORDER);
+    ry += 34;
+    if (g_hBtnToggle) SetWindowPos(g_hBtnToggle, NULL, rx, ry, rColW, 32, SWP_NOZORDER);
+    ry += 34;
+    if (g_hBtnReset) SetWindowPos(g_hBtnReset, NULL, rx, ry, rColW, 28, SWP_NOZORDER);
+    ry += 32;
+
     // 4. Instructions Box
-    if (g_hInstrTitle) SetWindowPos(g_hInstrTitle, NULL, rx, ry, rColW, 26, SWP_NOZORDER);
-    ry += 30;
-    if (g_hInstrStep) SetWindowPos(g_hInstrStep, NULL, rx, ry, rColW, 26, SWP_NOZORDER);
-    ry += 30;
-    if (g_hInstrOptionTag) SetWindowPos(g_hInstrOptionTag, NULL, rx, ry, rColW, 30, SWP_NOZORDER);
-    ry += 36;
-    if (g_hInstrLine1) SetWindowPos(g_hInstrLine1, NULL, rx, ry, rColW, 42, SWP_NOZORDER);
-    ry += 48;
-    if (g_hInstrLine2) SetWindowPos(g_hInstrLine2, NULL, rx, ry, rColW, 48, SWP_NOZORDER);
-    ry += 54;
-    if (g_hInstrLine3) SetWindowPos(g_hInstrLine3, NULL, rx, ry, rColW, 42, SWP_NOZORDER);
+    if (g_hInstrTitle) SetWindowPos(g_hInstrTitle, NULL, rx, ry, rColW, 20, SWP_NOZORDER);
+    ry += 20;
+    if (g_hInstrStep) SetWindowPos(g_hInstrStep, NULL, rx, ry, rColW, 20, SWP_NOZORDER);
+    ry += 20;
+    if (g_hInstrOptionTag) SetWindowPos(g_hInstrOptionTag, NULL, rx, ry, rColW, 22, SWP_NOZORDER);
+    ry += 22;
+    if (g_hInstrLine1) SetWindowPos(g_hInstrLine1, NULL, rx, ry, rColW, 32, SWP_NOZORDER);
+    ry += 34;
+    if (g_hInstrLine2) SetWindowPos(g_hInstrLine2, NULL, rx, ry, rColW, 32, SWP_NOZORDER);
+    ry += 34;
+    if (g_hInstrLine3) SetWindowPos(g_hInstrLine3, NULL, rx, ry, rColW, 32, SWP_NOZORDER);
 }
 
 // Multi-Monitor Safe Capture with 100% True-Color Alpha Preservation
@@ -658,14 +602,12 @@ void ApplyPixelProcessing(Bitmap* bmp, float sphereVal, float cylVal, int axisAn
     memcpy(g_pixelCopyBuffer.data(), pixels, totalBytes);
     BYTE* copy = g_pixelCopyBuffer.data();
 
-    float effectiveSharpness = deconvStrength + (fabs(sphereVal) * 0.15f) + (fabs(cylVal) * 0.25f);
-    if (effectiveSharpness > 4.0f) effectiveSharpness = 4.0f;
+    float effectiveSharpness = deconvStrength + (fabs(sphereVal) * 0.12f) + (fabs(cylVal) * 0.20f);
+    if (effectiveSharpness > 3.8f) effectiveSharpness = 3.8f;
 
     float angleRad = (float)(axisAngle * 3.14159265f / 180.0f);
     int dx = (int)round(cos(angleRad));
     int dy = (int)round(sin(angleRad));
-
-    float factor = (259.0f * (contrastVal * 255.0f + 255.0f)) / (255.0f * (259.0f - contrastVal * 255.0f));
 
     for (int y = 1; y < h - 1; y++) {
         BYTE* row = pixels + (y * stride);
@@ -700,10 +642,11 @@ void ApplyPixelProcessing(Bitmap* bmp, float sphereVal, float cylVal, int axisAn
                 int right = (int)rowCopy[offsetR + c];
                 int highPassOmni = center * 4 - top - bottom - left - right;
 
-                float val = (float)center + (float)highPassDir * (effectiveSharpness * 0.16f) + (float)highPassOmni * (effectiveSharpness * 0.10f);
+                float val = (float)center + (float)highPassDir * (effectiveSharpness * 0.15f) + (float)highPassOmni * (effectiveSharpness * 0.08f);
 
+                // Pure Linear Contrast Formula (100% prevents color inversion/negative bug!)
                 if (contrastVal != 1.0f) {
-                    val = factor * (val - 128.0f) + 128.0f;
+                    val = ((val - 128.0f) * contrastVal) + 128.0f;
                 }
 
                 if (val < 0.0f) val = 0.0f;
@@ -775,12 +718,12 @@ void RenderViewportScene(HWND hWndTarget, HDC hdc, int width, int height) {
     float distFactor = 60.0f / (float)max(30, g_state.distance);
     
     // Scale Sphere & Margin Headroom
-    float sphereScale = (1.0f + (curSphere * -0.025f * distFactor)) * g_state.marginRatio;
+    float sphereScale = (1.0f + (curSphere * -0.022f * distFactor)) * g_state.marginRatio;
     if (sphereScale < 0.70f) sphereScale = 0.70f;
     if (sphereScale > 1.45f) sphereScale = 1.45f;
 
-    // Bounded Cylinder Anamorphic ratio (prevents excessive screen tilt/skew)
-    float cylRatio = 1.0f + (curCyl * -0.025f * distFactor);
+    // Bounded Cylinder Anamorphic ratio
+    float cylRatio = 1.0f + (curCyl * -0.022f * distFactor);
     if (cylRatio < 0.85f) cylRatio = 0.85f;
     if (cylRatio > 1.25f) cylRatio = 1.25f;
 
@@ -869,74 +812,69 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         case WM_CREATE: {
             g_hWndMain = hWnd;
             InitCommonControls();
-            if (!g_hBrushWindowBg) g_hBrushWindowBg = CreateSolidBrush(g_colorWindowBg);
-            if (!g_hBrushPanelBg) g_hBrushPanelBg = CreateSolidBrush(g_colorPanelBg);
-            if (!g_hBrushPanelAlt) g_hBrushPanelAlt = CreateSolidBrush(g_colorPanelAlt);
+            g_d3dAvailable = ProbeD3D11Overlay(&g_d3dStatus);
+
+            // Register Global Hotkeys so you never lose control of keyboard/mouse
+            RegisterHotKey(hWnd, HOTKEY_ID_TOGGLE_COMPENSATION, MOD_CONTROL | MOD_ALT, 'V');
+            RegisterHotKey(hWnd, HOTKEY_ID_FULLSCREEN, 0, VK_F11);
+            RegisterHotKey(hWnd, HOTKEY_ID_ESCAPE, 0, VK_ESCAPE);
+
+            g_hBrushWindowBg = CreateSolidBrush(g_colorWindowBg);
+            g_hBrushPanelBg = CreateSolidBrush(g_colorPanelBg);
+            g_hBrushPanelAlt = CreateSolidBrush(g_colorPanelAlt);
             
             // Fonts
-            g_hFontBigHeader = CreateFontW(26, 0, 0, 0, FW_HEAVY, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-            g_hFontLabels = CreateFontW(18, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-            g_hFontValues = CreateFontW(21, 0, 0, 0, FW_HEAVY, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Consolas");
-            g_hFontBtns = CreateFontW(20, 0, 0, 0, FW_HEAVY, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-            g_hFontBigBtns = CreateFontW(24, 0, 0, 0, FW_HEAVY, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-            g_hFontApplyBtn = CreateFontW(23, 0, 0, 0, FW_HEAVY, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+            g_hFontBigHeader = CreateFontW(18, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+            g_hFontLabels = CreateFontW(13, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+            g_hFontValues = CreateFontW(15, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Consolas");
+            g_hFontBtns = CreateFontW(14, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+            g_hFontBigBtns = CreateFontW(15, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+            g_hFontApplyBtn = CreateFontW(15, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
 
-            g_hFontInstrBold = CreateFontW(19, 0, 0, 0, FW_HEAVY, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-            g_hFontInstrBody = CreateFontW(17, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+            g_hFontInstrBold = CreateFontW(13, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+            g_hFontInstrBody = CreateFontW(11, 0, 0, 0, FW_REGULAR, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
 
             // Register Viewport Class
             WNDCLASSW wc = {0};
             wc.lpfnWndProc = ViewportWndProc;
             wc.hInstance = GetModuleHandle(NULL);
-            wc.lpszClassName = L"OpticalViewportJCCClass";
+            wc.lpszClassName = L"OpticalViewportDirectClass";
             wc.hCursor = LoadCursor(NULL, IDC_ARROW);
             RegisterClassW(&wc);
 
             // 1. Viewport (Left)
             g_hWndViewport = CreateWindowExW(
-                0, L"OpticalViewportJCCClass", L"",
+                0, L"OpticalViewportDirectClass", L"",
                 WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
                 10, 10, 800, 600, hWnd, NULL, wc.hInstance, NULL
             );
 
             // 2. Bottom 4 Action Buttons
-            g_hBtnOpt1 = CreateWindowW(L"BUTTON", L"1  MEJOR [1]", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW, 0, 0, 100, 50, hWnd, (HMENU)ID_BTN_CHOOSE_1, wc.hInstance, NULL);
-            SendMessageW(g_hBtnOpt1, WM_SETFONT, (WPARAM)g_hFontBigBtns, TRUE);
-
-            g_hBtnOpt2 = CreateWindowW(L"BUTTON", L"2  MEJOR [2]", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW, 0, 0, 100, 50, hWnd, (HMENU)ID_BTN_CHOOSE_2, wc.hInstance, NULL);
-            SendMessageW(g_hBtnOpt2, WM_SETFONT, (WPARAM)g_hFontBigBtns, TRUE);
-
-            g_hBtnIgual = CreateWindowW(L"BUTTON", L"IGUAL / LISTO [3]", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW, 0, 0, 100, 50, hWnd, (HMENU)ID_BTN_CHOOSE_IGUAL, wc.hInstance, NULL);
-            SendMessageW(g_hBtnIgual, WM_SETFONT, (WPARAM)g_hFontBigBtns, TRUE);
-
-            g_hBtnMuchoPeor = CreateWindowW(L"BUTTON", L"MUCHO PEOR [4]", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW, 0, 0, 100, 50, hWnd, (HMENU)ID_BTN_CHOOSE_MUCHO_PEOR, wc.hInstance, NULL);
-            SendMessageW(g_hBtnMuchoPeor, WM_SETFONT, (WPARAM)g_hFontBigBtns, TRUE);
+            g_hBtnOpt1 = CreateWindowW(L"BUTTON", L"1️⃣ 1 es Mejor [1]", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW, 0, 0, 100, 50, hWnd, (HMENU)ID_BTN_CHOOSE_1, wc.hInstance, NULL);
+            g_hBtnOpt2 = CreateWindowW(L"BUTTON", L"2️⃣ 2 es Mejor [2]", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW, 0, 0, 100, 50, hWnd, (HMENU)ID_BTN_CHOOSE_2, wc.hInstance, NULL);
+            g_hBtnIgual = CreateWindowW(L"BUTTON", L"⚖️ Igual / Veo Bien [3]", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW, 0, 0, 100, 50, hWnd, (HMENU)ID_BTN_CHOOSE_IGUAL, wc.hInstance, NULL);
+            g_hBtnMuchoPeor = CreateWindowW(L"BUTTON", L"🚫 Mucho Peor [4]", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW, 0, 0, 100, 50, hWnd, (HMENU)ID_BTN_CHOOSE_MUCHO_PEOR, wc.hInstance, NULL);
 
             // 3. Right Side Controls
-            g_hODTitle = CreateStyledStatic(hWnd, L"RECETA LENTES (OD)", SS_CENTER, wc.hInstance);
+            g_hODTitle = CreateWindowW(L"STATIC", L"RECETA LENTES (OD)", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | SS_CENTER, 0, 0, 100, 24, hWnd, NULL, wc.hInstance, NULL);
             SendMessageW(g_hODTitle, WM_SETFONT, (WPARAM)g_hFontBigHeader, TRUE);
 
-            g_hODSub = CreateStyledStatic(hWnd, L"Rango extendido: -10D a +10D", SS_CENTER, wc.hInstance);
+            g_hODSub = CreateWindowW(L"STATIC", L"Rango Extendido [-10D a +10D]:", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | SS_CENTER, 0, 0, 100, 16, hWnd, NULL, wc.hInstance, NULL);
             SendMessageW(g_hODSub, WM_SETFONT, (WPARAM)g_hFontLabels, TRUE);
 
             auto CreateODRowControls = [&](const std::wstring& name, int minusId, int plusId, HWND& outLbl, HWND& outMinus, HWND& outVal, HWND& outPlus, HWND* outM5 = NULL, HWND* outP5 = NULL, int minus5Id = 0, int plus5Id = 0) {
-                outLbl = CreateStyledStatic(hWnd, name, SS_LEFT, wc.hInstance);
+                outLbl = CreateWindowW(L"STATIC", name.c_str(), WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | SS_LEFT, 0, 0, 100, 20, hWnd, NULL, wc.hInstance, NULL);
                 SendMessageW(outLbl, WM_SETFONT, (WPARAM)g_hFontLabels, TRUE);
 
                 outMinus = CreateWindowW(L"BUTTON", L"-", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW, 0, 0, 34, 28, hWnd, (HMENU)(INT_PTR)minusId, wc.hInstance, NULL);
-                SendMessageW(outMinus, WM_SETFONT, (WPARAM)g_hFontBtns, TRUE);
-
-                outVal = CreateStyledStatic(hWnd, L"0.00", SS_CENTER, wc.hInstance);
+                outVal = CreateWindowW(L"STATIC", L"0.00", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | SS_CENTER | SS_SUNKEN, 0, 0, 75, 24, hWnd, NULL, wc.hInstance, NULL);
                 SendMessageW(outVal, WM_SETFONT, (WPARAM)g_hFontValues, TRUE);
 
                 outPlus = CreateWindowW(L"BUTTON", L"+", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW, 0, 0, 34, 28, hWnd, (HMENU)(INT_PTR)plusId, wc.hInstance, NULL);
-                SendMessageW(outPlus, WM_SETFONT, (WPARAM)g_hFontBtns, TRUE);
 
                 if (outM5 && outP5) {
                     *outM5 = CreateWindowW(L"BUTTON", L"-5°", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW, 0, 0, 54, 24, hWnd, (HMENU)(INT_PTR)minus5Id, wc.hInstance, NULL);
                     *outP5 = CreateWindowW(L"BUTTON", L"+5°", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW, 0, 0, 54, 24, hWnd, (HMENU)(INT_PTR)plus5Id, wc.hInstance, NULL);
-                    SendMessageW(*outM5, WM_SETFONT, (WPARAM)g_hFontBtns, TRUE);
-                    SendMessageW(*outP5, WM_SETFONT, (WPARAM)g_hFontBtns, TRUE);
                 }
             };
 
@@ -946,38 +884,29 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             CreateODRowControls(L"Nitidez / Enfoque:", ID_BTN_DECONV_MINUS, ID_BTN_DECONV_PLUS, g_hLblDeconv, g_hBtnDeconvMinus, g_lblValDeconv, g_hBtnDeconvPlus);
 
             // Prominent Action Button: [ 🚀 APLICAR A MONITORES ]
-            g_hBtnApplyMonitors = CreateWindowW(L"BUTTON", L"APLICAR A MONITORES", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW, 0, 0, 100, 36, hWnd, (HMENU)ID_BTN_APPLY_MONITORS, wc.hInstance, NULL);
-            SendMessageW(g_hBtnApplyMonitors, WM_SETFONT, (WPARAM)g_hFontApplyBtn, TRUE);
-
-            g_hBtnFullScreen = CreateWindowW(L"BUTTON", L"Pantalla Completa [F11]", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW, 0, 0, 100, 30, hWnd, (HMENU)ID_BTN_FULLSCREEN, wc.hInstance, NULL);
-            SendMessageW(g_hBtnFullScreen, WM_SETFONT, (WPARAM)g_hFontLabels, TRUE);
-
-            g_hBtnToggleMonitor = CreateWindowW(L"BUTTON", L"Cambiar Monitor (1 / 2)", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW, 0, 0, 100, 30, hWnd, (HMENU)ID_BTN_TOGGLE_MONITOR, wc.hInstance, NULL);
-            SendMessageW(g_hBtnToggleMonitor, WM_SETFONT, (WPARAM)g_hFontLabels, TRUE);
-
-            g_hBtnToggle = CreateWindowW(L"BUTTON", L"Alternar Lupa / Cartilla", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW, 0, 0, 100, 30, hWnd, (HMENU)ID_BTN_TOGGLE_SOURCE, wc.hInstance, NULL);
-            SendMessageW(g_hBtnToggle, WM_SETFONT, (WPARAM)g_hFontLabels, TRUE);
-
+            g_hBtnApplyMonitors = CreateWindowW(L"BUTTON", L"🚀 APLICAR A MONITORES", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW, 0, 0, 100, 36, hWnd, (HMENU)ID_BTN_APPLY_MONITORS, wc.hInstance, NULL);
+            g_hBtnFullScreen = CreateWindowW(L"BUTTON", L"📺 Pantalla Completa [F11]", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW, 0, 0, 100, 30, hWnd, (HMENU)ID_BTN_FULLSCREEN, wc.hInstance, NULL);
+            g_hBtnToggleMonitor = CreateWindowW(L"BUTTON", L"🖥️ Cambiar Monitor (1 / 2)", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW, 0, 0, 100, 30, hWnd, (HMENU)ID_BTN_TOGGLE_MONITOR, wc.hInstance, NULL);
+            g_hBtnToggle = CreateWindowW(L"BUTTON", L"📑 Alternar Lupa / Cartilla", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW, 0, 0, 100, 30, hWnd, (HMENU)ID_BTN_TOGGLE_SOURCE, wc.hInstance, NULL);
             g_hBtnReset = CreateWindowW(L"BUTTON", L"Reiniciar Calibración", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW, 0, 0, 100, 26, hWnd, (HMENU)ID_BTN_RESET, wc.hInstance, NULL);
-            SendMessageW(g_hBtnReset, WM_SETFONT, (WPARAM)g_hFontLabels, TRUE);
 
             // 4. Instructions Box
-            g_hInstrTitle = CreateStyledStatic(hWnd, L"GUIA DE AUTO-CALIBRACION", SS_LEFT, wc.hInstance);
+            g_hInstrTitle = CreateWindowW(L"STATIC", L"📋 GUÍA DE AUTO-CALIBRACIÓN:", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | SS_LEFT, 0, 0, 100, 18, hWnd, NULL, wc.hInstance, NULL);
             SendMessageW(g_hInstrTitle, WM_SETFONT, (WPARAM)g_hFontInstrBold, TRUE);
 
-            g_hInstrStep = CreateStyledStatic(hWnd, L"Paso: 1/3 (Miopia / Esfera)", SS_LEFT, wc.hInstance);
+            g_hInstrStep = CreateWindowW(L"STATIC", L"Paso: 1/3 (Miopía / Esfera)", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | SS_LEFT, 0, 0, 100, 18, hWnd, NULL, wc.hInstance, NULL);
             SendMessageW(g_hInstrStep, WM_SETFONT, (WPARAM)g_hFontInstrBold, TRUE);
 
-            g_hInstrOptionTag = CreateStyledStatic(hWnd, L"En pantalla: OPCION 1", SS_LEFT, wc.hInstance);
+            g_hInstrOptionTag = CreateWindowW(L"STATIC", L"🔴 En pantalla: OPCIÓN 1", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | SS_LEFT, 0, 0, 100, 20, hWnd, NULL, wc.hInstance, NULL);
             SendMessageW(g_hInstrOptionTag, WM_SETFONT, (WPARAM)g_hFontInstrBold, TRUE);
 
-            g_hInstrLine1 = CreateStyledStatic(hWnd, L"1. Mira bordes negros, halos y sombras dobles.", SS_LEFT, wc.hInstance);
+            g_hInstrLine1 = CreateWindowW(L"STATIC", L"• Alterna [1] y [2] cada 1 segundo automáticamente.", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | SS_LEFT, 0, 0, 100, 30, hWnd, NULL, wc.hInstance, NULL);
             SendMessageW(g_hInstrLine1, WM_SETFONT, (WPARAM)g_hFontInstrBody, TRUE);
 
-            g_hInstrLine2 = CreateStyledStatic(hWnd, L"2. Pulsa 1 o 2 solo si una opcion es claramente mas nitida.", SS_LEFT, wc.hInstance);
+            g_hInstrLine2 = CreateWindowW(L"STATIC", L"• Pulsa [1] o [2] según cuál se vea más clara.", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | SS_LEFT, 0, 0, 100, 30, hWnd, NULL, wc.hInstance, NULL);
             SendMessageW(g_hInstrLine2, WM_SETFONT, (WPARAM)g_hFontInstrBody, TRUE);
 
-            g_hInstrLine3 = CreateStyledStatic(hWnd, L"3. Pulsa IGUAL cuando no puedas distinguir diferencia.", SS_LEFT, wc.hInstance);
+            g_hInstrLine3 = CreateWindowW(L"STATIC", L"• [🚀 APLICAR] activa la corrección sin bloquear mouse.", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | SS_LEFT, 0, 0, 100, 30, hWnd, NULL, wc.hInstance, NULL);
             SendMessageW(g_hInstrLine3, WM_SETFONT, (WPARAM)g_hFontInstrBody, TRUE);
 
             SetupCurrentTestOptions();
@@ -989,6 +918,21 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
             g_state.lastToggleTick = GetTickCount();
             SetTimer(hWnd, TIMER_FRAME_UPDATE, 50, NULL);
+            return 0;
+        }
+
+        case WM_HOTKEY: {
+            if (wParam == HOTKEY_ID_TOGGLE_COMPENSATION || wParam == HOTKEY_ID_FULLSCREEN) {
+                if (g_state.sourceType != 3) {
+                    g_state.sourceType = 3;
+                    g_state.appPhase = PHASE_MAGNIFIER_90;
+                }
+                ToggleFullScreen(hWnd);
+            } else if (wParam == HOTKEY_ID_ESCAPE) {
+                if (g_state.isFullScreen) {
+                    ToggleFullScreen(hWnd);
+                }
+            }
             return 0;
         }
 
@@ -1051,6 +995,9 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             switch (wParam) {
                 case VK_F11:
                     ToggleFullScreen(hWnd);
+                    break;
+                case VK_ESCAPE:
+                    if (g_state.isFullScreen) ToggleFullScreen(hWnd);
                     break;
 
                 case '1':
@@ -1163,7 +1110,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                         g_state.axisStep = max(2.0f, g_state.axisStep * 0.50f);
                         if (g_state.axisStep <= 2.0f || g_state.iterationCount >= 5) {
                             g_state.appPhase = PHASE_MAGNIFIER_90;
-                            g_state.sourceType = 3; // Live desktop
+                            g_state.sourceType = 3;
                         }
                     }
                 } 
@@ -1171,14 +1118,11 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     if (g_state.calibPhase == CALIB_SPHERE) {
                         g_state.sphereStep = max(0.25f, g_state.sphereStep * 0.5f);
                         g_state.sphereCenter = g_state.sphere;
-                        g_state.sphere = g_state.sphereCenter;
                     } else if (g_state.calibPhase == CALIB_CYL_POWER) {
                         g_state.cylStep = max(0.25f, g_state.cylStep * 0.5f);
                         g_state.cylCenter = g_state.cylinder;
-                        g_state.cylinder = g_state.cylCenter;
                     } else if (g_state.calibPhase == CALIB_AXIS_FINE) {
                         g_state.axisStep = max(2.0f, g_state.axisStep * 0.5f);
-                        g_state.axisCenter = (float)g_state.axis;
                     }
                 }
                 else {
@@ -1289,6 +1233,9 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
 
         case WM_DESTROY:
+            UnregisterHotKey(hWnd, HOTKEY_ID_TOGGLE_COMPENSATION);
+            UnregisterHotKey(hWnd, HOTKEY_ID_FULLSCREEN);
+            UnregisterHotKey(hWnd, HOTKEY_ID_ESCAPE);
             KillTimer(hWnd, TIMER_FRAME_UPDATE);
             if (g_hBrushWindowBg) DeleteObject(g_hBrushWindowBg);
             if (g_hBrushPanelBg) DeleteObject(g_hBrushPanelBg);
@@ -1314,15 +1261,15 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
     WNDCLASSW wc = {0};
     wc.lpfnWndProc = MainWndProc;
     wc.hInstance = hInstance;
-    wc.lpszClassName = L"VisionCompensatorJCCClass";
+    wc.lpszClassName = L"VisionCompensatorTrueClass";
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
     wc.hIcon = LoadIcon(NULL, IDI_APPLICATION);
     RegisterClassW(&wc);
 
     HWND hWnd = CreateWindowExW(
-        0, L"VisionCompensatorJCCClass",
-        L"Vision Compensator - Jackson Cross-Cylinder & Aplicar a Monitores",
+        0, L"VisionCompensatorTrueClass",
+        L"Vision Compensator - Jackson Cross-Cylinder & Click-Through Passthrough",
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
         50, 50, 1300, 800,
         NULL, NULL, hInstance, NULL
