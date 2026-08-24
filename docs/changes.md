@@ -50,6 +50,13 @@
 - Se documento que esta tecnica puede mejorar letras sin latencia, pero no corrige fotos, video ni contenido rasterizado.
 - Se agrego una fase de tareas para calibrar `weight`, `tracking`, `width`, `line-height` y exportar CSS/perfil.
 
+## 2026-08-24 - Ruta Linux
+
+- Se agrego `docs/linux_portability.md` con la diferencia entre el core optico portable y el codigo Windows-only.
+- Se documento una ruta Linux por etapas: core C++ portable, GLSL/OpenGL, X11 primero, Wayland/PipeWire despues.
+- Se agrego la opcion experimental `xrandr --transform` para probar transformaciones de pantalla completa en X11 con muy baja latencia.
+- Se agrego Phase 9 en `docs/implementation_tasks.md` para invitar contribuciones Linux.
+
 ## 2026-08-24 - Inicio implementacion GPU
 
 - Se extrajo `OpticalState` a `optical_state.h` para compartir parametros entre UI Win32 y renderer GPU.

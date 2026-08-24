@@ -49,6 +49,7 @@ Maybe partly. Maybe only for text. Maybe only for certain prescriptions. That is
 - Click-through overlay so mouse and keyboard can still work.
 - Subjective A/B visual test for tuning values.
 - Early Direct3D 11 / HLSL GPU path started.
+- Linux support is planned through a portable optical core plus OpenGL/Vulkan backends, not by directly compiling the Win32 UI.
 - Research notes included in `docs/`.
 
 The current version is experimental and not a medical device.
@@ -113,6 +114,7 @@ See `docs/`:
 - `docs/gpu_overlay_viability_notes.md`: why Direct3D 11 is the next practical step.
 - `docs/implementation_tasks.md`: build plan.
 - `docs/adaptive_font_for_vision.md`: custom font idea for clearer text.
+- `docs/linux_portability.md`: Linux/X11/Wayland roadmap and portability limits.
 
 ---
 
@@ -124,6 +126,8 @@ See `docs/`:
 - Add edge-aware filtering focused on text clarity.
 - Add per-user vision profiles.
 - Explore adaptive fonts generated from the user's visual profile.
+- Split the optical engine from platform-specific Windows code so Linux can use the same math.
+- Prototype Linux support with GLSL/OpenGL and X11 first, then investigate Wayland/PipeWire.
 - Evaluate virtual display / IddCx only after the GPU overlay proves useful.
 
 ---

@@ -134,6 +134,23 @@ Acceptance:
 El usuario puede elegir un preset tipografico que haga letras mas legibles sin activar overlay ni agregar latencia
 ```
 
+## Phase 9 - Linux Community Path
+
+- [ ] Documentar que `main.cpp` actual es Windows-only por Win32/GDI+/D3D11.
+- [ ] Extraer matematicas de correccion a C++ portable sin dependencias Win32.
+- [ ] Crear shader GLSL equivalente a `optical_shader.hlsl`.
+- [ ] Crear demo Linux con GLFW/SDL2 + OpenGL usando una imagen de prueba.
+- [ ] Investigar backend X11 con `XComposite`, `XDamage`, `XShm` y ventana click-through.
+- [ ] Investigar backend Wayland con PipeWire/xdg-desktop-portal.
+- [ ] Documentar alternativa experimental con `xrandr --transform` para X11.
+- [ ] Exportar perfil de fuente para `fontconfig` como primera utilidad Linux sin overlay.
+
+Acceptance:
+
+```text
+Linux puede ejecutar una demo de correccion visual con el mismo core optico, aunque el overlay completo llegue despues
+```
+
 ## Build Command Target
 
 Cuando se agreguen archivos D3D11, `build.bat` deberia evolucionar hacia:
