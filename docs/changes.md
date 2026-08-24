@@ -29,3 +29,10 @@
 
 - Se recompilo `VisionCompensator.exe` correctamente con MinGW/G++.
 - Se elimino el warning de `UNICODE` redefinido.
+
+## 2026-08-24 - Investigacion de estado del arte
+
+- Se agrego `docs/prior_art_and_algorithms.md` con investigaciones previas sobre pantallas que corrigen vision.
+- Se documentaron metodos usados por MIT Media Lab, Purdue/ACM, UC Berkeley/Barsky y trabajos recientes de inverse blurring.
+- Se identificaron algoritmos utiles para integrar despues: PSF + Wiener deconvolution, luma-only YCbCr, edge-masked deconvolution, light-field prefiltering, Zernike y QUEST/ZEST.
+- Se marco la diferencia entre lo viable en software sobre monitor 2D y lo que requiere hardware light-field/parallax/lenslet.
