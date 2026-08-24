@@ -36,3 +36,10 @@
 - Se documentaron metodos usados por MIT Media Lab, Purdue/ACM, UC Berkeley/Barsky y trabajos recientes de inverse blurring.
 - Se identificaron algoritmos utiles para integrar despues: PSF + Wiener deconvolution, luma-only YCbCr, edge-masked deconvolution, light-field prefiltering, Zernike y QUEST/ZEST.
 - Se marco la diferencia entre lo viable en software sobre monitor 2D y lo que requiere hardware light-field/parallax/lenslet.
+
+## 2026-08-24 - Decision de arquitectura GPU
+
+- Se agrego `docs/gpu_overlay_viability_notes.md` con la decision tecnica: primero D3D11/DXGI/HLSL, no driver ni DisplayLink.
+- Se agrego `docs/implementation_tasks.md` con fases concretas para implementar el overlay GPU.
+- Se definio el rol del margen 90%: no es la graduacion, es espacio seguro para estirar/rotar sin cortar imagen.
+- Se documento la formula inicial para `scaleAlongAxis` y `scaleAcrossAxis` usando `sphere`, `cylinder`, `axis`, distancia y margen.
